@@ -39,6 +39,18 @@ function git(cwd: string, args: string[]): GitResult {
   };
 }
 
+// `merge-base --is-ancestor` answers by exit code: 0 yes, 1 no. Anything
+// higher is git failing to answer, so a caller testing `ok` alone would read a
+// broken repo as a "no" verdict.
+function isAncestor(
+  cwd: string,
+  ancestor: string,
+  descendant: string,
+): { yes: boolean; err?: GitResult } {
+  const r = git(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
+  return r.code > 1 ? { yes: false, err: r } : { yes: r.code === 0 };
+}
+
 const fail = (what: string, r: GitResult): CheckoutResult => ({
   ok: false,
   reason: `${what}: ${r.err || r.out || "git failed"}`,
@@ -86,9 +98,7 @@ function fallbackWorktree(
     if (!status.ok) return fail("git status", status);
     // Reset only a copy holding nothing the PR is missing — an earlier run may
     // have committed here and nobody has picked those commits up yet.
-    const spent =
-      !status.out &&
-      git(path, ["merge-base", "--is-ancestor", "HEAD", headSha]).ok;
+    const spent = !status.out && isAncestor(path, "HEAD", headSha).yes;
     if (spent) {
       const co = git(path, ["checkout", "--detach", headSha]);
       if (!co.ok) return fail("git checkout --detach", co);
@@ -134,24 +144,13 @@ export function resolveCheckout(
 
     // Unpushed commits on top of the PR head are usable, and so is a checkout
     // behind it — only a history the PR head is missing from entirely is not,
-    // which takes the question in both directions. `--is-ancestor` exits 1 for
-    // that verdict; only a higher code is a git failure.
-    const contains = git(path, [
-      "merge-base",
-      "--is-ancestor",
-      headSha,
-      "HEAD",
-    ]);
-    if (contains.code > 1) return fail("git merge-base", contains);
-    if (contains.code === 1) {
-      const behind = git(path, [
-        "merge-base",
-        "--is-ancestor",
-        "HEAD",
-        headSha,
-      ]);
-      if (behind.code > 1) return fail("git merge-base", behind);
-      if (behind.code === 1)
+    // which takes the question in both directions.
+    const contains = isAncestor(path, headSha, "HEAD");
+    if (contains.err) return fail("git merge-base", contains.err);
+    if (!contains.yes) {
+      const behind = isAncestor(path, "HEAD", headSha);
+      if (behind.err) return fail("git merge-base", behind.err);
+      if (!behind.yes)
         return fallback(`checkout diverged from PR head: ${path}`);
     }
 
