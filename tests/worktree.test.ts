@@ -30,6 +30,16 @@ test("parseWorktrees: reads path, head, and branch/detached from porcelain", () 
   });
 });
 
+test("parseWorktrees: a registered worktree whose directory is gone is marked prunable", () => {
+  const w = parseWorktrees(`${PORCELAIN}
+worktree /Users/x/Work/worktrees/gone
+HEAD dddd
+detached
+prunable gitdir file points to non-existent location
+`);
+  expect(w.map((x) => !!x.prunable)).toEqual([false, false, false, true]);
+});
+
 test("pickReviewWorktrees: only worktrees that are new AND at the PR head sha", () => {
   const before = ["/Users/x/Work/recruitee"];
   const after = parseWorktrees(PORCELAIN);

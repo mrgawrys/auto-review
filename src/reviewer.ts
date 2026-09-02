@@ -146,7 +146,7 @@ const headOf = (wt: string): string | null => {
 };
 
 // Remove one worktree, or say what it left standing. A fallback whose HEAD has
-// moved off the PR head it was created at holds commits that exist nowhere
+// moved off the PR head it was last handed holds commits that exist nowhere
 // else until the author cherry-picks them: that one is kept, not removed.
 function removeWorktree(
   ctx: Ctx,
@@ -157,13 +157,13 @@ function removeWorktree(
   logPrefix: string,
 ): Kept | null {
   if (!existsSync(wt)) return null; // already gone; prune will drop the admin record
-  const fb = entry?.checkout_fallback;
-  if (fb && entry?.checkout_path === wt) {
+  const base = entry?.fallback_bases?.[wt];
+  if (base) {
     // A path git can no longer read a HEAD from holds nothing to keep — let
     // `worktree remove` say why instead of reporting a keep that preserved
     // nothing.
     const head = headOf(wt);
-    if (head !== null && head !== fb.base) {
+    if (head !== null && head !== base) {
       ctx.log(`${logPrefix} ${key}: kept worktree ${wt} — it has commits`);
       return { path: wt, reason: "has-commits" };
     }
@@ -208,18 +208,20 @@ export function cleanupEntry(ctx: Ctx, key: string, logPrefix: string): Kept[] {
   Bun.spawnSync(["git", "-C", clone, "worktree", "prune"], { stderr: "pipe" });
 
   // A checkout docket created also created its branch (`worktree add -b`), and
-  // `worktree remove` leaves that ref behind — which makes every later receive
-  // for the same PR refuse with "exists locally but isn't checked out". Only
-  // the branch of a checkout we own is ever deleted; the user's own worktree
-  // is not in worktrees[] and its branch is not ours to touch. A fallback is
-  // owned but detached — it created no branch, so that ref is the author's.
-  const ownedCheckout =
-    !!entry?.checkout_path && recorded.includes(entry.checkout_path);
+  // `worktree remove` leaves that ref behind — which sends every later receive
+  // for the same PR to a fallback. Only a branch docket created is ever
+  // deleted; the user's own is not ours to touch, and a fallback is detached
+  // and created none. Entries from before branch_owned was recorded: an owned
+  // checkout that is not a fallback created its branch.
+  const ownsBranch =
+    entry?.branch_owned ??
+    (!!entry?.checkout_path &&
+      recorded.includes(entry.checkout_path) &&
+      !entry.checkout_fallback);
   if (
     entryKind(key) === "mine" &&
     entry?.branch &&
-    ownedCheckout &&
-    !entry.checkout_fallback &&
+    ownsBranch &&
     !kept.length
   ) {
     const d = Bun.spawnSync(

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type CheckoutResult, resolveCheckout } from "../src/checkout";
@@ -188,6 +188,7 @@ test("branch absent everywhere: created under checkoutsDir, tracking, owned", ()
   expect(r.owned).toBe(true);
   expect(realpathSync(r.path).startsWith(realpathSync(s.tmp))).toBe(true);
   expect(r.path).toBe(join(s.checkoutsDir, "feature"));
+  expect(r.ownsBranch).toBe(true);
   expect(git(r.path, "rev-parse", "HEAD")).toBe(s.headSha);
   expect(git(r.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feature");
   // tracks the remote branch
@@ -203,20 +204,23 @@ test("branch absent everywhere: created under checkoutsDir, tracking, owned", ()
   expect(again.owned).toBe(true);
 });
 
-test("docket's own tracking worktree, gone dirty, is reused as itself", () => {
+// docket's own tracking worktree sits where a fallback would go, so there is
+// nothing to fall back to: the verdict is reported, not silently run over.
+test("docket's own tracking worktree, gone dirty, is refused as such", () => {
   const s = scenario();
   const first = resolve(s); // absent everywhere: docket creates it, on the branch
   if (!first.ok) throw new Error(first.reason);
   writeFileSync(join(first.path, "f.txt"), "uncommitted\n");
 
   const again = resolve(s);
-  expect(again).toEqual({ ok: true, path: first.path, owned: true });
-  // a fallback here would tell cleanup the branch is the author's, and docket
-  // would leak the ref it created
+  expect(again).toEqual({
+    ok: false,
+    reason: `checkout dirty: ${first.path}`,
+  });
   expect(git(first.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feature");
 });
 
-test("docket's own tracking worktree, diverged, is reused as itself", () => {
+test("docket's own tracking worktree, diverged, is refused with its commits intact", () => {
   const s = scenario();
   const first = resolve(s);
   if (!first.ok) throw new Error(first.reason);
@@ -231,7 +235,72 @@ test("docket's own tracking worktree, diverged, is reused as itself", () => {
   git(s.origin, "checkout", "-q", "main");
 
   const again = resolveCheckout(s.clone, "feature", newHead, s.checkoutsDir);
-  expect(again).toEqual({ ok: true, path: first.path, owned: true });
+  expect(again).toEqual({
+    ok: false,
+    reason: `checkout diverged from PR head: ${first.path}`,
+  });
   expect(git(first.path, "rev-parse", "HEAD")).toBe(agentSha);
   expect(git(first.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feature");
+});
+
+test("a fallback holding commits the PR head has moved past is refused, not reset", () => {
+  const s = scenario();
+  git(s.clone, "checkout", "-q", "feature");
+  writeFileSync(join(s.clone, "f.txt"), "uncommitted\n");
+  const first = resolve(s);
+  if (!first.ok) throw new Error(first.reason);
+  writeFileSync(join(first.path, "f.txt"), "the agent's fix\n");
+  git(first.path, "commit", "-qam", "agent commit");
+  const agentSha = git(first.path, "rev-parse", "HEAD");
+
+  // the PR head is rewritten under it: the copy is now behind AND ahead
+  git(s.origin, "checkout", "-q", "feature");
+  git(s.origin, "commit", "-q", "--amend", "-m", "feature work, amended");
+  const newHead = git(s.origin, "rev-parse", "HEAD");
+  git(s.origin, "checkout", "-q", "main");
+
+  const again = resolveCheckout(s.clone, "feature", newHead, s.checkoutsDir);
+  expect(again.ok).toBe(false);
+  if (again.ok) throw new Error("unexpected ok");
+  expect(again.reason).toContain(`${first.path} holds unpicked work`);
+  expect(git(first.path, "rev-parse", "HEAD")).toBe(agentSha);
+});
+
+test("a worktree at the slug of a different branch is refused, never adopted", () => {
+  const s = scenario();
+  // `feat/x` and `feat-x` share a slug; each is a branch on origin
+  for (const [name, content] of [
+    ["feat/x", "x\n"],
+    ["feat-x", "dash\n"],
+  ] as const) {
+    git(s.origin, "checkout", "-qb", name, "main");
+    writeFileSync(join(s.origin, "f.txt"), content);
+    git(s.origin, "commit", "-qam", name);
+  }
+  const shaOf = (name: string) => git(s.origin, "rev-parse", name);
+  git(s.origin, "checkout", "-q", "main");
+
+  const a = resolveCheckout(s.clone, "feat/x", shaOf("feat/x"), s.checkoutsDir);
+  if (!a.ok) throw new Error(a.reason);
+  const b = resolveCheckout(s.clone, "feat-x", shaOf("feat-x"), s.checkoutsDir);
+  expect(b.ok).toBe(false);
+  if (b.ok) throw new Error("unexpected ok");
+  expect(b.reason).toContain("holds refs/heads/feat/x");
+  // the first PR's worktree is untouched: still on its branch, at its head
+  expect(git(a.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feat/x");
+  expect(git(a.path, "rev-parse", "HEAD")).toBe(shaOf("feat/x"));
+});
+
+test("a registered worktree whose directory is gone is pruned, not wedged on", () => {
+  const s = scenario();
+  const first = resolve(s);
+  if (!first.ok) throw new Error(first.reason);
+  rmSync(first.path, { recursive: true, force: true }); // no `worktree prune`
+
+  // the branch docket created is still there, checked out nowhere: a fallback
+  expectFallback(
+    s,
+    resolve(s),
+    "branch feature exists locally but isn't checked out",
+  );
 });

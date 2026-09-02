@@ -6,13 +6,16 @@
 
 import { existsSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
-import { parseWorktrees } from "./worktree";
+import { parseWorktrees, type WorktreeInfo } from "./worktree";
 
 export type CheckoutResult =
   | {
       ok: true;
       path: string;
       owned: boolean; // created by docket (this call, or previously under checkoutsDir)
+      // the one path that creates the branch (`worktree add -b`) — that ref
+      // is docket's to delete at cleanup, wherever later runs end up
+      ownsBranch?: boolean;
       // set when path is docket's copy instead of the user's checkout: the PR
       // head it stands for, and why the user's was passed over
       fallback?: { base: string; reason: string };
@@ -21,7 +24,6 @@ export type CheckoutResult =
 
 interface GitResult {
   ok: boolean;
-  code: number;
   out: string;
   err: string;
 }
@@ -33,28 +35,32 @@ function git(cwd: string, args: string[]): GitResult {
   });
   return {
     ok: p.exitCode === 0,
-    code: p.exitCode,
     out: p.stdout.toString().trim(),
     err: p.stderr.toString().trim(),
   };
-}
-
-// `merge-base --is-ancestor` answers by exit code: 0 yes, 1 no. Anything
-// higher is git failing to answer, so a caller testing `ok` alone would read a
-// broken repo as a "no" verdict.
-function isAncestor(
-  cwd: string,
-  ancestor: string,
-  descendant: string,
-): { yes: boolean; err?: GitResult } {
-  const r = git(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
-  return r.code > 1 ? { yes: false, err: r } : { yes: r.code === 0 };
 }
 
 const fail = (what: string, r: GitResult): CheckoutResult => ({
   ok: false,
   reason: `${what}: ${r.err || r.out || "git failed"}`,
 });
+
+// How the checkout at cwd relates to the PR head: commits of headSha it is
+// missing, and commits of its own that headSha lacks.
+function compare(
+  cwd: string,
+  headSha: string,
+): { missing: number; ahead: number } | { err: GitResult } {
+  const r = git(cwd, [
+    "rev-list",
+    "--left-right",
+    "--count",
+    `${headSha}...HEAD`,
+  ]);
+  if (!r.ok) return { err: r };
+  const [missing = 0, ahead = 0] = r.out.split(/\s+/).map(Number);
+  return { missing, ahead };
+}
 
 // tmpdirs and home directories are routinely symlinked (macOS /tmp) while git
 // reports real paths — compare like with like.
@@ -76,6 +82,7 @@ function fallbackWorktree(
   branch: string,
   headSha: string,
   checkoutsDir: string,
+  worktrees: WorktreeInfo[],
   reason: string,
 ): CheckoutResult {
   const path = slugPath(checkoutsDir, branch);
@@ -83,9 +90,6 @@ function fallbackWorktree(
     const fetch = git(clone, ["fetch", "origin", branch]);
     if (!fetch.ok) return fail("git fetch", fetch);
   }
-
-  const list = git(clone, ["worktree", "list", "--porcelain"]);
-  if (!list.ok) return fail("git worktree list", list);
   const done = (): CheckoutResult => ({
     ok: true,
     path: real(path),
@@ -93,22 +97,46 @@ function fallbackWorktree(
     fallback: { base: headSha, reason },
   });
 
-  if (parseWorktrees(list.out).some((w) => real(w.path) === real(path))) {
+  const leftover = worktrees.find((w) => real(w.path) === real(path));
+  if (leftover) {
+    // slugPath folds `feat/x` and `feat-x` into one directory: a worktree
+    // here on a branch is another PR's tracking checkout, not a copy to reuse.
+    if (!leftover.detached)
+      return {
+        ok: false,
+        reason: `${path} holds ${leftover.branch ?? "another branch"}, not a copy for ${branch}`,
+      };
     const status = git(path, ["status", "--porcelain"]);
     if (!status.ok) return fail("git status", status);
-    // Reset only a copy holding nothing the PR is missing — an earlier run may
-    // have committed here and nobody has picked those commits up yet.
-    const spent = !status.out && isAncestor(path, "HEAD", headSha).yes;
-    if (spent) {
+    const c = compare(path, headSha);
+    if ("err" in c) return fail("git rev-list", c.err);
+    // Reset only a copy holding nothing the PR is missing. One holding an
+    // earlier run's unpicked work is reused as it stands while it still
+    // contains the PR head — and refused once it doesn't, since the agent and
+    // the keep guard would be told it stands at a head it never reached.
+    const held = !!status.out || c.ahead > 0;
+    if (held && c.missing > 0)
+      return {
+        ok: false,
+        reason: `${path} holds unpicked work from an earlier run and is behind the PR head — cherry-pick its commits, then remove the worktree`,
+      };
+    if (!held) {
       const co = git(path, ["checkout", "--detach", headSha]);
       if (!co.ok) return fail("git checkout --detach", co);
     }
     return done();
   }
 
-  const add = git(clone, ["worktree", "add", "--detach", path, headSha]);
+  const add = addWorktree(clone, ["--detach", path, headSha]);
   if (!add.ok) return fail("git worktree add", add);
   return done();
+}
+
+// A worktree whose directory is gone stays registered until pruned, and
+// `worktree add` refuses its path — prune first.
+function addWorktree(clone: string, args: string[]): GitResult {
+  git(clone, ["worktree", "prune"]);
+  return git(clone, ["worktree", "add", ...args]);
 }
 
 export function resolveCheckout(
@@ -119,15 +147,22 @@ export function resolveCheckout(
 ): CheckoutResult {
   const list = git(clone, ["worktree", "list", "--porcelain"]);
   if (!list.ok) return fail("git worktree list", list);
-  const worktrees = parseWorktrees(list.out);
+  const worktrees = parseWorktrees(list.out).filter((w) => !w.prunable);
   const found = worktrees.find((w) => w.branch === `refs/heads/${branch}`);
-  // A copy docket already owns needs no fallback: it is docket's to work in as
-  // it stands, and it holds the branch docket created — labelling it a
-  // fallback would tell cleanup that ref is the author's and leak it.
+  // A copy docket already owns is docket's own tracking worktree, and its
+  // path is where the fallback would go: nothing to fall back to, so the
+  // verdict is reported instead of a run on whatever it holds.
   const fallback = (reason: string): CheckoutResult =>
     found && under(found.path, checkoutsDir)
-      ? { ok: true, path: found.path, owned: true }
-      : fallbackWorktree(clone, branch, headSha, checkoutsDir, reason);
+      ? { ok: false, reason }
+      : fallbackWorktree(
+          clone,
+          branch,
+          headSha,
+          checkoutsDir,
+          worktrees,
+          reason,
+        );
 
   if (found) {
     const path = found.path;
@@ -136,23 +171,18 @@ export function resolveCheckout(
     if (status.out) return fallback(`checkout dirty: ${path}`);
 
     // The PR head may be newer than anything fetched yet — without its object
-    // the ancestry check below can only error out.
+    // the comparison below can only error out.
     if (!git(path, ["cat-file", "-e", `${headSha}^{commit}`]).ok) {
       const fetch = git(clone, ["fetch", "origin", branch]);
       if (!fetch.ok) return fail("git fetch", fetch);
     }
 
     // Unpushed commits on top of the PR head are usable, and so is a checkout
-    // behind it — only a history the PR head is missing from entirely is not,
-    // which takes the question in both directions.
-    const contains = isAncestor(path, headSha, "HEAD");
-    if (contains.err) return fail("git merge-base", contains.err);
-    if (!contains.yes) {
-      const behind = isAncestor(path, "HEAD", headSha);
-      if (behind.err) return fail("git merge-base", behind.err);
-      if (!behind.yes)
-        return fallback(`checkout diverged from PR head: ${path}`);
-    }
+    // behind it — only a history the PR head is missing from entirely is not.
+    const c = compare(path, headSha);
+    if ("err" in c) return fail("git rev-list", c.err);
+    if (c.missing > 0 && c.ahead > 0)
+      return fallback(`checkout diverged from PR head: ${path}`);
 
     if (found.head !== headSha) {
       const ff = git(path, ["merge", "--ff-only", headSha]);
@@ -179,9 +209,7 @@ export function resolveCheckout(
   // `worktree add` only reports "already exists" — reuse it instead.
   if (worktrees.some((w) => real(w.path) === real(path)))
     return fallback(`branch ${branch} exists nowhere locally`);
-  const add = git(clone, [
-    "worktree",
-    "add",
+  const add = addWorktree(clone, [
     "--track",
     "-b",
     branch,
@@ -191,5 +219,5 @@ export function resolveCheckout(
   if (!add.ok) return fail("git worktree add", add);
   // realpath, to match what `git worktree list` will report on the next call —
   // otherwise the same checkout gets recorded twice under two spellings.
-  return { ok: true, path: real(path), owned: true };
+  return { ok: true, path: real(path), owned: true, ownsBranch: true };
 }

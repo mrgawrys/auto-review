@@ -50,9 +50,16 @@ export interface Entry {
   // receive runner's cwd all read it.
   checkout_path?: string;
   // Set when checkout_path is docket's own detached copy rather than the
-  // user's checkout: base is the PR head it was created at, so a HEAD past it
-  // means the run committed work that lives nowhere else yet.
-  checkout_fallback?: { base: string; reason: string };
+  // user's checkout, with why the user's was passed over.
+  checkout_fallback?: { reason: string };
+  // The PR head each detached copy was last handed, by path — a HEAD past it
+  // means a run committed work that lives nowhere else yet. Kept for as long
+  // as the copy stands, whatever later runs resolve to.
+  fallback_bases?: Record<string, string>;
+  // docket created the branch itself (`worktree add -b`), so the ref is
+  // docket's to delete at cleanup. Written once; never derived from where a
+  // later run happened to land.
+  branch_owned?: boolean;
   // Mine entries: who left the newest actionable review. The panel shows it,
   // and the TUI never fetches — so sync records it here.
   reviewer?: string;
