@@ -317,3 +317,27 @@ TUI-visible change is a status-line string.
   author's branch — the author does that, deliberately.
 - Changing what counts as actionable feedback, or the auto-run gate
   (`receive_enabled`, drafts).
+
+## Amendments from the post-implementation review (2026-09-02)
+
+The review of the built branch reshaped four points above; the code is the
+authority where they differ.
+
+- **Ancestry is one `rev-list --left-right --count headSha...HEAD`**, not two
+  `merge-base --is-ancestor` calls: both non-zero counts is *diverged*, and a
+  failing git is an error rather than a "no".
+- **`base` lives per path, not on `checkout_fallback`.** `Entry.fallback_bases`
+  maps each detached copy to the PR head it was last handed and survives a
+  later run resolving in place; `checkout_fallback` keeps only `reason`. The
+  keep guard reads the map, so a copy's commits outlive the entry pointing
+  elsewhere.
+- **Branch ownership is recorded, not inferred.** `Entry.branch_owned` is
+  written once by the `worktree add -b` path; cleanup deletes the branch on
+  that, not on `!checkout_fallback`. A docket-created tracking worktree that
+  has gone dirty or diverged is therefore *refused* with its reason — it sits
+  where the fallback would go, so there is nothing to fall back to.
+- **A leftover at the slug is reused only if it is detached** (`feat/x` and
+  `feat-x` share a slug) **and only while it still contains the PR head**; a
+  copy holding unpicked commits that the PR has moved past is refused.
+  Prunable worktree records are ignored and pruned before `worktree add`.
+

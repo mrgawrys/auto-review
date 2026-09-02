@@ -131,8 +131,13 @@ When it can't be used, docket never touches it: uncommitted changes, a
 history the PR head is missing from (you rebased or amended), or a branch
 checked out nowhere all send the run to a detached worktree docket creates at
 the PR head, under `~/.local/state/docket/checkouts/`. That copy goes away
-when you dismiss the entry — unless the run committed there, in which case it
-stays put and the commits are yours to cherry-pick.
+when you dismiss the entry or the PR closes — unless a run committed there, in
+which case it stays put and the commits are yours to cherry-pick. A copy still
+holding such commits is reused as long as it contains the PR head; once the PR
+moves past it, the run is blocked until you cherry-pick and remove the copy.
+The same goes for a checkout docket created itself that has gone dirty or
+diverged: with nowhere to fall back to, the run is blocked and the reason
+recorded on the entry.
 
 ## receive_prompt
 
