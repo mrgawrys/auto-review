@@ -556,6 +556,36 @@ test("dismissing a mine entry frees its branch for the next receive", async () =
   await sb.waitEntry("mine:testorg/demo#7", (x) => x.status === "ready");
 });
 
+test("a dirty checkout of docket's own is still docket's to clean up", async () => {
+  const sb = makeSandbox();
+  const { clone, mineJson } = prScenario(sb);
+
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  writeFileSync(join(e.checkout_path, "f.txt"), "uncommitted\n");
+
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const again = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  expect(realpathSync(again.checkout_path)).toBe(realpathSync(e.checkout_path));
+  // docket created this copy and its branch: calling it a fallback would tell
+  // cleanup the ref is the author's and leak it into the clone forever
+  expect("checkout_fallback" in again).toBe(false);
+
+  expect(sb.run(["dismiss", "mine:testorg/demo#7"]).code).toBe(0);
+  expect(existsSync(e.checkout_path)).toBe(false);
+  expect(git(clone, "branch", "--list", "feature")).toBe("");
+});
+
 test("dismissing a fallback run never deletes the author's branch", async () => {
   const sb = makeSandbox();
   const { clone, mineJson } = prScenario(sb);

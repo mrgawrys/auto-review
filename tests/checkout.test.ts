@@ -202,3 +202,36 @@ test("branch absent everywhere: created under checkoutsDir, tracking, owned", ()
   expect(realpathSync(again.path)).toBe(realpathSync(r.path));
   expect(again.owned).toBe(true);
 });
+
+test("docket's own tracking worktree, gone dirty, is reused as itself", () => {
+  const s = scenario();
+  const first = resolve(s); // absent everywhere: docket creates it, on the branch
+  if (!first.ok) throw new Error(first.reason);
+  writeFileSync(join(first.path, "f.txt"), "uncommitted\n");
+
+  const again = resolve(s);
+  expect(again).toEqual({ ok: true, path: first.path, owned: true });
+  // a fallback here would tell cleanup the branch is the author's, and docket
+  // would leak the ref it created
+  expect(git(first.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feature");
+});
+
+test("docket's own tracking worktree, diverged, is reused as itself", () => {
+  const s = scenario();
+  const first = resolve(s);
+  if (!first.ok) throw new Error(first.reason);
+  writeFileSync(join(first.path, "f.txt"), "the agent's fix\n");
+  git(first.path, "commit", "-qam", "agent commit");
+  const agentSha = git(first.path, "rev-parse", "HEAD");
+
+  // the PR head is rewritten under it
+  git(s.origin, "checkout", "-q", "feature");
+  git(s.origin, "commit", "-q", "--amend", "-m", "feature work, amended");
+  const newHead = git(s.origin, "rev-parse", "HEAD");
+  git(s.origin, "checkout", "-q", "main");
+
+  const again = resolveCheckout(s.clone, "feature", newHead, s.checkoutsDir);
+  expect(again).toEqual({ ok: true, path: first.path, owned: true });
+  expect(git(first.path, "rev-parse", "HEAD")).toBe(agentSha);
+  expect(git(first.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feature");
+});

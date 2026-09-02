@@ -1,8 +1,8 @@
 // Resolve the working copy for a PR branch: the user's clone, the user's
 // worktree, or one docket creates under checkoutsDir. A checkout holding the
-// PR head is used in place, unpushed commits and all; one that cannot be used
-// — dirty, diverged, or checked out nowhere — gets a detached copy of docket's
-// own at the PR head, never a second branch.
+// PR head is used in place, unpushed commits and all; one of the user's that
+// cannot be used — dirty, diverged, or checked out nowhere — gets a detached
+// copy of docket's own at the PR head, never a second branch.
 
 import { existsSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
@@ -111,8 +111,13 @@ export function resolveCheckout(
   if (!list.ok) return fail("git worktree list", list);
   const worktrees = parseWorktrees(list.out);
   const found = worktrees.find((w) => w.branch === `refs/heads/${branch}`);
+  // A copy docket already owns needs no fallback: it is docket's to work in as
+  // it stands, and it holds the branch docket created — labelling it a
+  // fallback would tell cleanup that ref is the author's and leak it.
   const fallback = (reason: string): CheckoutResult =>
-    fallbackWorktree(clone, branch, headSha, checkoutsDir, reason);
+    found && under(found.path, checkoutsDir)
+      ? { ok: true, path: found.path, owned: true }
+      : fallbackWorktree(clone, branch, headSha, checkoutsDir, reason);
 
   if (found) {
     const path = found.path;
