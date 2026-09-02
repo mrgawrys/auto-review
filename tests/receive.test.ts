@@ -641,6 +641,31 @@ test("dismiss keeps a fallback the run committed in, and says so", async () => {
   expect(git(clone, "cat-file", "-t", fixSha)).toBe("commit");
 });
 
+test("a checkout git can no longer read is a removal failure, not a keep", () => {
+  const sb = makeSandbox();
+  const { clone } = prScenario(sb);
+  // the directory outlived its worktree record — a pruned admin file, a
+  // restored state dir: nothing here was preserved for the author
+  const stale = join(sb.tmp, "stale-fallback");
+  mkdirSync(stale);
+  sb.writeState({
+    "mine:testorg/demo#7": {
+      status: "ready",
+      branch: "feature",
+      local_path: clone,
+      checkout_path: stale,
+      worktrees: [stale],
+      checkout_fallback: { base: "0".repeat(40), reason: "checkout dirty: x" },
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  });
+
+  const d = sb.run(["dismiss", "mine:testorg/demo#7"]);
+  expect(d.code).toBe(0);
+  expect(d.out).toContain(`could not remove ${stale}`);
+  expect(d.out).not.toContain("has commits");
+});
+
 test("a newly discovered PR does not re-address the feedback it arrived with", async () => {
   const sb = makeSandbox();
   const { mineJson } = prScenario(sb, { receive_enabled: true });

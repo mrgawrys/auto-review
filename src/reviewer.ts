@@ -137,13 +137,13 @@ function legacyWorktrees(clone: string, number: string): string[] {
 // like a failure to the person who asked for the dismissal.
 export type Kept = { path: string; reason: "failed" | "has-commits" };
 
-const headOf = (wt: string): string =>
-  Bun.spawnSync(["git", "-C", wt, "rev-parse", "HEAD"], {
+const headOf = (wt: string): string | null => {
+  const p = Bun.spawnSync(["git", "-C", wt, "rev-parse", "HEAD"], {
     stdout: "pipe",
     stderr: "pipe",
-  })
-    .stdout.toString()
-    .trim();
+  });
+  return p.exitCode === 0 ? p.stdout.toString().trim() : null;
+};
 
 // Remove one worktree, or say what it left standing. A fallback whose HEAD has
 // moved off the PR head it was created at holds commits that exist nowhere
@@ -158,9 +158,15 @@ function removeWorktree(
 ): Kept | null {
   if (!existsSync(wt)) return null; // already gone; prune will drop the admin record
   const fb = entry?.checkout_fallback;
-  if (fb && entry?.checkout_path === wt && headOf(wt) !== fb.base) {
-    ctx.log(`${logPrefix} ${key}: kept worktree ${wt} — it has commits`);
-    return { path: wt, reason: "has-commits" };
+  if (fb && entry?.checkout_path === wt) {
+    // A path git can no longer read a HEAD from holds nothing to keep — let
+    // `worktree remove` say why instead of reporting a keep that preserved
+    // nothing.
+    const head = headOf(wt);
+    if (head !== null && head !== fb.base) {
+      ctx.log(`${logPrefix} ${key}: kept worktree ${wt} — it has commits`);
+      return { path: wt, reason: "has-commits" };
+    }
   }
   const p = Bun.spawnSync(
     ["git", "-C", clone, "worktree", "remove", "--force", wt],
