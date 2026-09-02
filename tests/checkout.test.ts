@@ -68,15 +68,27 @@ test("dirty checkout blocks, never creates a second copy", () => {
   ).toBe(false);
 });
 
-test("checkout ahead of the PR head blocks", () => {
+test("checkout with unpushed commits on top of the PR head is used in place", () => {
   const s = scenario();
   git(s.clone, "checkout", "-q", "feature");
   writeFileSync(join(s.clone, "f.txt"), "local work\n");
   git(s.clone, "commit", "-qam", "local commit");
+  const local = git(s.clone, "rev-parse", "HEAD");
+  const r = resolve(s);
+  expect(r).toEqual({ ok: true, path: realpathSync(s.clone), owned: false });
+  // the unpushed commit is still HEAD: nothing reset it, nothing merged it away
+  expect(git(s.clone, "rev-parse", "HEAD")).toBe(local);
+});
+
+test("checkout diverged from the PR head blocks", () => {
+  const s = scenario();
+  git(s.clone, "checkout", "-q", "feature");
+  writeFileSync(join(s.clone, "f.txt"), "rewritten\n");
+  git(s.clone, "commit", "-q", "--amend", "-am", "feature work, amended");
   const r = resolve(s);
   expect(r).toEqual({
     ok: false,
-    reason: `checkout ahead of PR head: ${realpathSync(s.clone)}`,
+    reason: `checkout diverged from PR head: ${realpathSync(s.clone)}`,
   });
 });
 

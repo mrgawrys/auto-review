@@ -13,6 +13,7 @@ export type CheckoutResult =
 
 interface GitResult {
   ok: boolean;
+  code: number;
   out: string;
   err: string;
 }
@@ -24,6 +25,7 @@ function git(cwd: string, args: string[]): GitResult {
   });
   return {
     ok: p.exitCode === 0,
+    code: p.exitCode,
     out: p.stdout.toString().trim(),
     err: p.stderr.toString().trim(),
   };
@@ -62,16 +64,34 @@ export function resolveCheckout(
     if (status.out) return { ok: false, reason: `checkout dirty: ${path}` };
 
     // The PR head may be newer than anything fetched yet — without its object
-    // the ahead/behind checks below can only error out.
+    // the ancestry check below can only error out.
     if (!git(path, ["cat-file", "-e", `${headSha}^{commit}`]).ok) {
       const fetch = git(clone, ["fetch", "origin", branch]);
       if (!fetch.ok) return fail("git fetch", fetch);
     }
 
-    const ahead = git(path, ["rev-list", "--count", `${headSha}..HEAD`]);
-    if (!ahead.ok) return fail("git rev-list", ahead);
-    if (Number(ahead.out) > 0)
-      return { ok: false, reason: `checkout ahead of PR head: ${path}` };
+    // Unpushed commits on top of the PR head are usable, and so is a checkout
+    // behind it — only a history the PR head is missing from entirely is not,
+    // which takes the question in both directions. `--is-ancestor` exits 1 for
+    // that verdict; only a higher code is a git failure.
+    const contains = git(path, [
+      "merge-base",
+      "--is-ancestor",
+      headSha,
+      "HEAD",
+    ]);
+    if (contains.code > 1) return fail("git merge-base", contains);
+    if (contains.code === 1) {
+      const behind = git(path, [
+        "merge-base",
+        "--is-ancestor",
+        "HEAD",
+        headSha,
+      ]);
+      if (behind.code > 1) return fail("git merge-base", behind);
+      if (behind.code === 1)
+        return { ok: false, reason: `checkout diverged from PR head: ${path}` };
+    }
 
     if (found.head !== headSha) {
       const ff = git(path, ["merge", "--ff-only", headSha]);
