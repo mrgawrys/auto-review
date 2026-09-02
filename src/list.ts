@@ -10,7 +10,7 @@ import {
 } from "./config";
 import { isAllowed, isWriteShaped, type DenialGroup } from "./denials";
 import { handoffPrompt } from "./handoff";
-import { cleanupEntry, type Ctx } from "./reviewer";
+import { cleanupEntry, type Ctx, type Kept } from "./reviewer";
 import {
   isLiveReview,
   loadState,
@@ -168,9 +168,17 @@ export function buildHandoff(
 // whether that lands in a status line or on stdout.
 export function dismissKey(ctx: Ctx, key: string): string {
   setStatus(ctx.paths.statePath, key, "done");
-  const stuck = cleanupEntry(ctx, key, "DISMISS");
-  return stuck.length
-    ? `dismissed ${key} — could not remove ${stuck.join(", ")}`
+  const kept = cleanupEntry(ctx, key, "DISMISS");
+  const pathsWith = (reason: Kept["reason"]) =>
+    kept.filter((k) => k.reason === reason).map((k) => k.path);
+  const held = pathsWith("has-commits");
+  const failed = pathsWith("failed");
+  const notes = [
+    ...(held.length ? [`kept ${held.join(", ")} (has commits)`] : []),
+    ...(failed.length ? [`could not remove ${failed.join(", ")}`] : []),
+  ];
+  return notes.length
+    ? `dismissed ${key} — ${notes.join("; ")}`
     : `dismissed ${key}`;
 }
 

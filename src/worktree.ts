@@ -9,6 +9,7 @@ export interface WorktreeInfo {
   head?: string;
   branch?: string;
   detached?: boolean;
+  prunable?: boolean; // registered, but its directory is gone
 }
 
 // Parse `git worktree list --porcelain`: records separated by blank lines,
@@ -30,6 +31,7 @@ export function parseWorktrees(porcelain: string): WorktreeInfo[] {
     else if (key === "HEAD") cur.head = val;
     else if (key === "branch") cur.branch = val;
     else if (key === "detached") cur.detached = true;
+    else if (key === "prunable") cur.prunable = true;
   }
   if (cur) out.push(cur);
   return out;

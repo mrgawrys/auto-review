@@ -61,6 +61,30 @@ test("receivePrompt: custom body substituted, preamble still fixed, note appende
   expect(p.trimEnd().endsWith("skip the nits")).toBe(true);
 });
 
+test("receivePrompt: a fallback checkout is named as one, with its reason", () => {
+  const p = receivePrompt(
+    bareCfg(),
+    "mine:acme/widgets#12",
+    entry({
+      checkout_fallback: { reason: "checkout dirty: /home/me/widgets" },
+    }),
+  );
+  expect(p).toContain("fresh worktree docket created at the PR head");
+  expect(p).toContain("(`checkout dirty: /home/me/widgets`)");
+  expect(p).toContain("detached HEAD — that is expected");
+  expect(p).toContain("the author cherry-picks your commits onto their branch");
+  // and the opener no longer calls it the author's checkout of the branch
+  expect(p).not.toContain("the checkout of its branch");
+  // the fixed preamble and the summary demand survive
+  expect(p).toContain("NEVER push");
+  expect(p).toContain('"addressed"');
+
+  // absent for an ordinary checkout, which the opener names as one
+  const plain = receivePrompt(bareCfg(), "mine:acme/widgets#12", entry());
+  expect(plain).toContain("the checkout of its branch");
+  expect(plain).not.toContain("detached HEAD");
+});
+
 test("effectiveReceivePrompt: blank override falls back to the default", () => {
   expect(effectiveReceivePrompt(bareCfg({ receive_prompt: "  " }))).toBe(
     DEFAULT_RECEIVE_PROMPT,
@@ -216,7 +240,7 @@ test("feedback on an opted-in PR runs receive headlessly in a docket-owned check
   expect(sb.promptCapture()).toContain("NEVER push");
 });
 
-test("feedback with a blocked (dirty) checkout is skipped with the reason, no run", () => {
+test("feedback with a dirty checkout runs in a fallback, not in the user's work", async () => {
   const sb = makeSandbox();
   const { clone, mineJson } = prScenario(sb, { receive_enabled: true });
   git(clone, "checkout", "-q", "feature");
@@ -232,14 +256,59 @@ test("feedback with a blocked (dirty) checkout is skipped with the reason, no ru
     },
   });
 
-  const before = sb.claudeCalls();
   const r = sb.run(["sync"], { GH_PR_MINE_JSON: mineJson });
   expect(r.code).toBe(0);
-  const e = sb.state()["mine:testorg/demo#7"];
-  expect(e.status).toBe("skipped");
-  expect(e.error).toContain("checkout dirty");
-  expect(e.review_at).toBe("2026-07-19T10:00:00Z"); // cursor still advanced
-  expect(sb.claudeCalls()).toBe(before);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  const expected = realpathSync(
+    join(sb.stateDir, "checkouts", "testorg-demo", "feature"),
+  );
+  expect(realpathSync(e.checkout_path)).toBe(expected);
+  expect(realpathSync(sb.cwdCapture())).toBe(expected);
+  // the uncommitted work is the author's: never stashed, committed, or reset
+  expect(git(clone, "status", "--porcelain")).toContain("f.txt");
+});
+
+test("the entry records the fallback it ran in, and drops it once the checkout is usable", async () => {
+  const sb = makeSandbox();
+  const { clone, headSha, mineJson } = prScenario(sb, {
+    receive_enabled: true,
+  });
+  git(clone, "checkout", "-q", "feature");
+  writeFileSync(join(clone, "f.txt"), "uncommitted local work\n");
+  sb.writeState({
+    "mine:testorg/demo#7": {
+      status: "open",
+      branch: "feature",
+      local_path: clone,
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  });
+
+  expect(sb.run(["sync"], { GH_PR_MINE_JSON: mineJson }).code).toBe(0);
+  // recorded by the trigger and still there after the run rewrote the entry
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  expect(e.checkout_fallback).toEqual({
+    reason: `checkout dirty: ${realpathSync(clone)}`,
+  });
+  expect(e.fallback_bases).toEqual({ [e.checkout_path]: headSha });
+
+  // the author commits their work: their checkout is usable again, and the
+  // entry must stop pointing the reader at a copy the run no longer used
+  git(clone, "commit", "-qam", "the author's own commit");
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const after = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => realpathSync(x.checkout_path) === realpathSync(clone),
+  );
+  expect("checkout_fallback" in after).toBe(false);
 });
 
 test("feedback while not opted in records the verdict only", () => {
@@ -280,16 +349,19 @@ test("docket receive runs regardless of receive_enabled, keys under mine:", asyn
   // a URL normalizes into the same key shape
   expect(sb.run(["receive", "total garbage"]).code).not.toBe(0);
 
-  // a now-dirty checkout refuses with the reason on stderr, not silence
+  // a now-dirty checkout of docket's own blocks the run — whatever left the
+  // uncommitted work there, the next run neither throws it away nor runs on it
   writeFileSync(join(e.checkout_path, "f.txt"), "dirty\n");
-  const blocked = sb.run(["receive", "testorg/demo#7"], {
+  const again = sb.run(["receive", "testorg/demo#7"], {
     GH_PR_MINE_JSON: mineJson,
   });
-  expect(blocked.code).toBe(1);
-  expect(blocked.err).toContain("checkout dirty");
+  expect(again.code).not.toBe(0);
+  // the checkout resolves before the run detaches, so this is settled here
+  expect(sb.state()["mine:testorg/demo#7"].status).toBe("skipped");
+  expect(git(e.checkout_path, "status", "--porcelain")).toContain("f.txt");
 });
 
-test("docket retry on a mine key with a blocked checkout reports the reason, exit 1", () => {
+test("docket retry on a mine key with a dirty checkout runs in the fallback", async () => {
   const sb = makeSandbox();
   const { clone, mineJson } = prScenario(sb);
   git(clone, "checkout", "-q", "feature");
@@ -304,12 +376,38 @@ test("docket retry on a mine key with a blocked checkout reports the reason, exi
       updated_at: "2026-01-01T00:00:00Z",
     },
   });
+  const r = sb.run(["retry", "mine:testorg/demo#7"], {
+    GH_PR_MINE_JSON: mineJson,
+  });
+  expect(r.code).toBe(0);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  expect(realpathSync(e.checkout_path)).toBe(
+    realpathSync(join(sb.stateDir, "checkouts", "testorg-demo", "feature")),
+  );
+});
+
+test("docket retry on a mine key that still cannot resolve reports it, exit 1", () => {
+  const sb = makeSandbox();
+  const { mineJson } = prScenario(sb);
+  sb.writeState({
+    "mine:testorg/demo#7": {
+      status: "skipped",
+      title: "My PR",
+      url: "u",
+      branch: "feature",
+      local_path: join(sb.tmp, "clone-the-user-deleted"),
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  });
   const before = sb.claudeCalls();
   const r = sb.run(["retry", "mine:testorg/demo#7"], {
     GH_PR_MINE_JSON: mineJson,
   });
   expect(r.code).toBe(1); // same contract as docket receive, not a silent 0
-  expect(r.err).toContain("checkout dirty");
+  expect(r.err).toContain("no local clone mapped");
   expect(sb.claudeCalls()).toBe(before);
 });
 
@@ -323,7 +421,7 @@ test("docket receive on an unmapped repo refuses without writing state", () => {
   expect(sb.state()["mine:testorg/typoed#3"]).toBeUndefined();
 });
 
-test("exec re-checks the checkout before spawning claude (TOCTOU downgrade)", () => {
+test("exec re-checks the checkout before spawning claude (TOCTOU move)", () => {
   const sb = makeSandbox();
   const { clone, mineJson } = prScenario(sb, { receive_enabled: true });
   // the checkout went dirty between trigger and runner
@@ -338,15 +436,18 @@ test("exec re-checks the checkout before spawning claude (TOCTOU downgrade)", ()
       updated_at: new Date().toISOString(),
     },
   });
-  const before = sb.claudeCalls();
   const r = sb.run(["exec", "mine:testorg/demo#7"], {
     GH_PR_MINE_JSON: mineJson,
   });
-  expect(r.code).not.toBe(0);
-  const e = sb.state()["mine:testorg/demo#7"];
-  expect(e.status).toBe("skipped");
-  expect(e.error).toContain("checkout dirty");
-  expect(sb.claudeCalls()).toBe(before);
+  expect(r.code).toBe(0);
+  // the run moved to the fallback: the clone it was aimed at is not the cwd
+  const expected = realpathSync(
+    join(sb.stateDir, "checkouts", "testorg-demo", "feature"),
+  );
+  expect(realpathSync(sb.cwdCapture())).toBe(expected);
+  expect(realpathSync(sb.state()["mine:testorg/demo#7"].checkout_path)).toBe(
+    expected,
+  );
 });
 
 test("poll while logged out starts no receive run and leaves the cursor put", () => {
@@ -450,6 +551,183 @@ test("dismissing a mine entry frees its branch for the next receive", async () =
   expect(again.err).not.toContain("exists locally");
   expect(again.code).toBe(0);
   await sb.waitEntry("mine:testorg/demo#7", (x) => x.status === "ready");
+});
+
+test("a dirty checkout of docket's own blocks the run, and is still docket's to clean up", async () => {
+  const sb = makeSandbox();
+  const { clone, mineJson } = prScenario(sb);
+
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  expect(e.branch_owned).toBe(true);
+  writeFileSync(join(e.checkout_path, "f.txt"), "uncommitted\n");
+
+  // nowhere to fall back to — docket's copy is where the fallback would go —
+  // so the run is blocked out loud rather than run over the dirt
+  sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson });
+  const again = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "skipped",
+  );
+  expect(again.error).toBe(`checkout dirty: ${realpathSync(e.checkout_path)}`);
+
+  expect(sb.run(["dismiss", "mine:testorg/demo#7"]).code).toBe(0);
+  expect(existsSync(e.checkout_path)).toBe(false);
+  expect(git(clone, "branch", "--list", "feature")).toBe("");
+});
+
+test("the branch docket created is deleted even after its worktree was removed by hand", async () => {
+  const sb = makeSandbox();
+  const { clone, mineJson } = prScenario(sb);
+
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  // the user tidies the state dir: the worktree goes, docket's ref stays
+  git(clone, "worktree", "remove", "--force", e.checkout_path);
+  expect(git(clone, "branch", "--list", "feature")).toContain("feature");
+
+  // the next receive lands in a fallback for a branch checked out nowhere...
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const again = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready" && !!x.checkout_fallback,
+  );
+  expect(again.checkout_fallback.reason).toBe(
+    "branch feature exists locally but isn't checked out",
+  );
+
+  // ...which does not make the ref the author's: docket created it
+  expect(sb.run(["dismiss", "mine:testorg/demo#7"]).code).toBe(0);
+  expect(git(clone, "branch", "--list", "feature")).toBe("");
+});
+
+test("dismissing a fallback run never deletes the author's branch", async () => {
+  const sb = makeSandbox();
+  const { clone, mineJson } = prScenario(sb);
+  // the branch exists in the clone, checked out nowhere, and carries a commit
+  // that exists nowhere else — the one fallback shape git does not protect
+  const authorWt = join(sb.tmp, "author-wt");
+  git(clone, "worktree", "add", "-q", authorWt, "-b", "feature");
+  writeFileSync(join(authorWt, "f.txt"), "the author's unpushed work\n");
+  git(authorWt, "commit", "-qam", "unpushed");
+  const authorSha = git(authorWt, "rev-parse", "HEAD");
+  git(clone, "worktree", "remove", authorWt);
+
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  expect(e.checkout_fallback.reason).toBe(
+    "branch feature exists locally but isn't checked out",
+  );
+
+  expect(sb.run(["dismiss", "mine:testorg/demo#7"]).code).toBe(0);
+  expect(existsSync(e.checkout_path)).toBe(false);
+  expect(git(clone, "rev-parse", "refs/heads/feature")).toBe(authorSha);
+});
+
+test("dismiss keeps a fallback the run committed in, and says so", async () => {
+  const sb = makeSandbox();
+  const { clone, mineJson } = prScenario(sb);
+  git(clone, "checkout", "-q", "feature");
+  writeFileSync(join(clone, "f.txt"), "uncommitted local work\n");
+
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  // stand in for the agent: a commit that lives only in the fallback
+  writeFileSync(join(e.checkout_path, "f.txt"), "the fix the reviewer asked\n");
+  git(e.checkout_path, "commit", "-qam", "address the feedback");
+  const fixSha = git(e.checkout_path, "rev-parse", "HEAD");
+
+  const d = sb.run(["dismiss", "mine:testorg/demo#7"]);
+  expect(d.code).toBe(0);
+  expect(d.out).toContain(`kept ${e.checkout_path} (has commits)`);
+  expect(d.out).not.toContain("could not remove");
+  expect(existsSync(e.checkout_path)).toBe(true);
+  // the point of a detached copy: the author reaches the commit from the clone
+  expect(git(clone, "cat-file", "-t", fixSha)).toBe("commit");
+});
+
+test("a fallback's commits survive a later run that resolved in place", async () => {
+  const sb = makeSandbox();
+  const { clone, mineJson } = prScenario(sb);
+  git(clone, "checkout", "-q", "feature");
+  writeFileSync(join(clone, "f.txt"), "uncommitted local work\n");
+
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  const fallbackPath = e.checkout_path;
+  writeFileSync(join(fallbackPath, "f.txt"), "the fix the reviewer asked\n");
+  git(fallbackPath, "commit", "-qam", "address the feedback");
+  const fixSha = git(fallbackPath, "rev-parse", "HEAD");
+
+  // the author's checkout becomes usable: the next run happens there, and
+  // the entry stops calling itself a fallback — the copy is still standing
+  git(clone, "checkout", "-q", "--", "f.txt");
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const after = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => realpathSync(x.checkout_path) === realpathSync(clone),
+  );
+  expect("checkout_fallback" in after).toBe(false);
+
+  const d = sb.run(["dismiss", "mine:testorg/demo#7"]);
+  expect(d.code).toBe(0);
+  expect(d.out).toContain(`kept ${fallbackPath} (has commits)`);
+  expect(git(clone, "cat-file", "-t", fixSha)).toBe("commit");
+});
+
+test("a checkout git can no longer read is a removal failure, not a keep", () => {
+  const sb = makeSandbox();
+  const { clone } = prScenario(sb);
+  // the directory outlived its worktree record — a pruned admin file, a
+  // restored state dir: nothing here was preserved for the author
+  const stale = join(sb.tmp, "stale-fallback");
+  mkdirSync(stale);
+  sb.writeState({
+    "mine:testorg/demo#7": {
+      status: "ready",
+      branch: "feature",
+      local_path: clone,
+      checkout_path: stale,
+      worktrees: [stale],
+      checkout_fallback: { reason: "checkout dirty: x" },
+      fallback_bases: { [stale]: "0".repeat(40) },
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  });
+
+  const d = sb.run(["dismiss", "mine:testorg/demo#7"]);
+  expect(d.code).toBe(0);
+  expect(d.out).toContain(`could not remove ${stale}`);
+  expect(d.out).not.toContain("has commits");
 });
 
 test("a newly discovered PR does not re-address the feedback it arrived with", async () => {

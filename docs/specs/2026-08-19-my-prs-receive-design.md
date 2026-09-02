@@ -33,6 +33,9 @@ The 2026-08-04 TUI spec deferred exactly this and left the view seam for it.
   verbs use that checkout, and the auto-run is skipped (flagged for manual
   action) when it is dirty or ahead of the PR head. Only when the branch
   exists nowhere locally does docket create its own worktree.
+  *Superseded 2026-09-02:* a dirty, diverged or not-checked-out branch now
+  gets a detached copy at the PR head instead of a skip — see
+  `docs/specs/2026-09-02-receive-checkout-fallback-design.md`.
 - **Architecture:** second entry kind in the existing pipeline (approach 1 of
   3 explored; the parallel-subsystem and view-only-first alternatives are in
   the session's scratchpad notes). A receive run *is* a run — same detached

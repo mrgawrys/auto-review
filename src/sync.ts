@@ -218,11 +218,7 @@ async function syncMine(
   }
   const d = decideMineSync(info, me, entry);
   if (d.kind === "done") {
-    const reason = info.state === "MERGED" ? "merged" : "closed";
-    markDone(statePath, key, reason);
-    cleanupEntry(ctx, key, "SYNC");
-    ctx.log(`SYNC ${key}: PR ${reason} — marked done`);
-    ctx.counters.synced++;
+    await retire(ctx, key, info.state === "MERGED" ? "merged" : "closed");
     return;
   }
 
@@ -281,6 +277,28 @@ async function syncMine(
   await trigger(ctx, key, loadState(statePath)[key] ?? entry);
 }
 
+// The PR is over: mark the entry done and retire what the review left on
+// disk. A copy kept for its commits is the one thing the user must hear about
+// now — the entry is about to leave every list they look at.
+async function retire(
+  ctx: Ctx,
+  key: string,
+  reason: "merged" | "closed",
+): Promise<void> {
+  markDone(ctx.paths.statePath, key, reason);
+  const held = cleanupEntry(ctx, key, "SYNC")
+    .filter((k) => k.reason === "has-commits")
+    .map((k) => k.path);
+  ctx.log(`SYNC ${key}: PR ${reason} — marked done`);
+  if (held.length)
+    await notify(
+      ctx.cfg,
+      `docket: ${bareKey(key)} ${reason}`,
+      `kept ${held.join(", ")} — it has commits to cherry-pick`,
+    );
+  ctx.counters.synced++;
+}
+
 export async function reconcile(
   ctx: Ctx,
   trigger: TriggerReceive = triggerReceive,
@@ -315,10 +333,7 @@ export async function reconcile(
     }
     const d = decideSync(info, me);
     if (d.kind === "done") {
-      markDone(statePath, key, d.reason);
-      cleanupEntry(ctx, key, "SYNC");
-      ctx.log(`SYNC ${key}: PR ${d.reason} — marked done`);
-      ctx.counters.synced++;
+      await retire(ctx, key, d.reason);
     } else if (d.kind === "reviewed") {
       const cur = `${entry.status} ${(entry.flags ?? []).join(" ")}`;
       const next = `${d.verdict} ${d.flags.join(" ")}`;

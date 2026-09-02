@@ -25,13 +25,23 @@ export function receivePrompt(
   const body = effectiveReceivePrompt(cfg)
     .replaceAll("{number}", number)
     .replaceAll("{repo}", repo);
+  const fb = entry.checkout_fallback;
+  // A fallback is neither the author's checkout nor on the branch, so the
+  // opener cannot claim it is either.
+  const where = fb ? "a working copy" : "the checkout of its branch";
   let p =
     `You are addressing code review feedback on PR #${number} (${repo}), in ` +
-    `the checkout of its branch at ${entry.checkout_path ?? "."} — the ` +
+    `${where} at ${entry.checkout_path ?? "."} — the ` +
     `current directory. Work ONLY in this checkout; never touch any other ` +
     `working copy. You may edit files and commit locally. NEVER push, and ` +
     `NEVER write to GitHub (no comments, no reviews, no API mutations) — ` +
     `the author reviews your work and pushes themselves.\n\n` +
+    (fb
+      ? `This is a fresh worktree docket created at the PR head because your ` +
+        `own checkout of this branch could not be used (\`${fb.reason}\`). ` +
+        `It is on a detached HEAD — that is expected. Commit normally; the ` +
+        `author cherry-picks your commits onto their branch.\n\n`
+      : "") +
     `The feedback lives in three places; read all of them first: inline ` +
     `thread comments via \`gh api repos/${repo}/pulls/${number}/comments\`, ` +
     `review bodies via \`gh api repos/${repo}/pulls/${number}/reviews\`, ` +
@@ -94,6 +104,18 @@ export function prepareCheckout(
     checkout_path: r.path,
     local_path: clone,
     branch,
+    // written every time, undefined included: a checkout that resolves in
+    // place again must stop claiming its commits live somewhere else
+    checkout_fallback: r.fallback && { reason: r.fallback.reason },
+    ...(r.fallback
+      ? {
+          fallback_bases: {
+            ...entry.fallback_bases,
+            [r.path]: r.fallback.base,
+          },
+        }
+      : {}),
+    ...(r.ownsBranch ? { branch_owned: true } : {}),
     // worktrees[] means "paths docket may delete" — only a docket-created
     // checkout ever goes in.
     ...(r.owned && !(entry.worktrees ?? []).includes(r.path)
