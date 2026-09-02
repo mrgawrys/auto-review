@@ -169,10 +169,10 @@ export function buildHandoff(
 export function dismissKey(ctx: Ctx, key: string): string {
   setStatus(ctx.paths.statePath, key, "done");
   const kept = cleanupEntry(ctx, key, "DISMISS");
-  const paths = (reason: Kept["reason"]) =>
+  const pathsWith = (reason: Kept["reason"]) =>
     kept.filter((k) => k.reason === reason).map((k) => k.path);
-  const held = paths("has-commits");
-  const failed = paths("failed");
+  const held = pathsWith("has-commits");
+  const failed = pathsWith("failed");
   const notes = [
     ...(held.length ? [`kept ${held.join(", ")} (has commits)`] : []),
     ...(failed.length ? [`could not remove ${failed.join(", ")}`] : []),

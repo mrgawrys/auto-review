@@ -42,14 +42,13 @@ function expectFallback(
   s: ReturnType<typeof scenario>,
   r: CheckoutResult,
   reason: string,
-): string {
+): void {
   if (!r.ok) throw new Error(r.reason);
   expect(r.path).toBe(realpathSync(join(s.checkoutsDir, "feature")));
   expect(r.owned).toBe(true);
   expect(r.fallback).toEqual({ base: s.headSha, reason });
   expect(git(r.path, "rev-parse", "HEAD")).toBe(s.headSha);
   expect(git(r.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
-  return r.path;
 }
 
 test("branch checked out in the clone itself: reused, not owned", () => {
@@ -169,6 +168,17 @@ test("a clean fallback behind the PR head is reset to it", () => {
   expect(again.path).toBe(first.path);
   expect(git(again.path, "rev-parse", "HEAD")).toBe(newHead);
   expect(again.fallback?.base).toBe(newHead);
+});
+
+test("a leftover fallback is reused once the branch has vanished from the clone", () => {
+  const s = scenario();
+  git(s.clone, "branch", "feature", "origin/feature");
+  const first = resolve(s); // checked out nowhere: a detached fallback
+  if (!first.ok) throw new Error(first.reason);
+  // the author deletes the branch: docket's copy now sits exactly where the
+  // tracking worktree would go, and `worktree add` would only say "exists"
+  git(s.clone, "branch", "-D", "feature");
+  expectFallback(s, resolve(s), "branch feature exists nowhere locally");
 });
 
 test("branch absent everywhere: created under checkoutsDir, tracking, owned", () => {
