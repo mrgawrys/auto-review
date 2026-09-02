@@ -149,7 +149,7 @@ The rest of the CLI:
 | Command | What it does |
 | --- | --- |
 | `docket review ORG/REPO#N ["note"]` | force-review any PR (URLs work too); the note is handed to the reviewer as extra context |
-| `docket receive ORG/REPO#N ["note"]` | act on the review feedback on your own PR, regardless of `receive_enabled`; refuses a dirty or diverged checkout |
+| `docket receive ORG/REPO#N ["note"]` | act on the review feedback on your own PR, regardless of `receive_enabled`; runs in the PR's checkout, or in a copy docket makes at the PR head when that one can't be used |
 | `docket watch [ORG/REPO#N]` | follow a running review live; without an argument, follow the poller log |
 | `docket poll [--dry-run]` | one full cycle: sync, then find PRs newly awaiting you and review them (this is what the poller runs) |
 | `docket sync` | reconcile with GitHub now: merged/closed PRs are dismissed, PRs you already reviewed show your verdict; never starts a review |

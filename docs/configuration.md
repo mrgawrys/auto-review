@@ -126,10 +126,13 @@ listed but never auto-run. The manual paths — `docket receive`, the mine
 view's `R` — work regardless of this key.
 
 If the PR's branch is already checked out somewhere in your clone, that
-checkout is used; a dirty checkout, or one ahead of the PR head, blocks the
-run (`skipped`, with the reason shown) rather than risking your work. Only
-when the branch exists nowhere locally does docket create its own worktree
-under `~/.local/state/docket/checkouts/` (removed on dismiss).
+checkout is used — unpushed commits sitting on top of the PR head and all.
+When it can't be used, docket never touches it: uncommitted changes, a
+history the PR head is missing from (you rebased or amended), or a branch
+checked out nowhere all send the run to a detached worktree docket creates at
+the PR head, under `~/.local/state/docket/checkouts/`. That copy goes away
+when you dismiss the entry — unless the run committed there, in which case it
+stays put and the commits are yours to cherry-pick.
 
 ## receive_prompt
 
