@@ -653,7 +653,10 @@ export function App({
   });
 
   return (
-    <Box flexDirection="column" width={width}>
+    // A line wider than the terminal is soft-wrapped by the terminal, and Ink
+    // erases the one line it laid out — the leftover row survives into the next
+    // frame. Clipping here is what keeps a row one row.
+    <Box flexDirection="column" width={width} overflowX="hidden">
       {/* the tabs are the title: the bar under them carries only the position */}
       <Tabs list={list} counts={counts} />
       <Bar

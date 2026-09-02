@@ -540,3 +540,32 @@ test("a verb that fails says so in the footer instead of clearing the status", a
   expect(ui.lastFrame()).toContain("does the PR exist?");
   ui.unmount();
 });
+
+// The columns of a my-PRs row add up to more than a narrow terminal holds.
+// A line wider than the terminal is soft-wrapped by the terminal, and Ink
+// erases the one line it laid out — the leftover row survives into the next
+// frame, so moving the cursor repeats the header. Invisible on a wide screen,
+// which is where this gets developed.
+const printed = (frame: string): string[] =>
+  frame.replace(/\u001B\[[0-9;]*[A-Za-z]/g, "").split("\n");
+
+test("no row outgrows the terminal, however wide its columns want to be", async () => {
+  const wide = (n: number): Partial<Entry> => ({
+    title: "A title long enough to want every column the row will not give it",
+    threads: { unresolved: 10, total: 12 },
+    summary: { addressed: 12, deferred: 3 },
+    branch: "b",
+    reviewer: "carol",
+    updated_at: `2026-01-0${n}T00:00:00Z`,
+  });
+  const ui = mount({
+    "mine:acme/a-rather-long-repo-name#12345": entry(wide(1)),
+    "mine:acme/another-long-repo-name#67890": entry(wide(2)),
+  });
+  ui.stdin.write("\t"); // into my PRs, whose receive column is 26 wide
+  await Bun.sleep(40);
+  // ink-testing-library renders at 100 columns
+  const over = printed(ui.lastFrame() ?? "").filter((l) => l.length > 100);
+  expect(over).toEqual([]);
+  ui.unmount();
+});

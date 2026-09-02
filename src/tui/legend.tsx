@@ -102,8 +102,11 @@ export function Legend({
   unavailable: Record<string, string>;
 }) {
   const items = KEYMAPS[view].filter((b) => FOOTER[view].includes(b.keys));
+  // One Text, not a row of them: laid out as a row, a narrow terminal squeezes
+  // each binding until it wraps, and the frame grows a line the height math
+  // never budgeted for.
   return (
-    <Box>
+    <Text wrap="truncate-end">
       {items.map((b, i) => {
         const off = b.verb !== undefined && b.verb in unavailable;
         return (
@@ -114,7 +117,7 @@ export function Legend({
           </Text>
         );
       })}
-    </Box>
+    </Text>
   );
 }
 
