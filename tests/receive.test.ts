@@ -529,6 +529,34 @@ test("dismissing a mine entry frees its branch for the next receive", async () =
   await sb.waitEntry("mine:testorg/demo#7", (x) => x.status === "ready");
 });
 
+test("dismissing a fallback run never deletes the author's branch", async () => {
+  const sb = makeSandbox();
+  const { clone, mineJson } = prScenario(sb);
+  // the branch exists in the clone, checked out nowhere, and carries a commit
+  // that exists nowhere else — the one fallback shape git does not protect
+  const authorWt = join(sb.tmp, "author-wt");
+  git(clone, "worktree", "add", "-q", authorWt, "-b", "feature");
+  writeFileSync(join(authorWt, "f.txt"), "the author's unpushed work\n");
+  git(authorWt, "commit", "-qam", "unpushed");
+  const authorSha = git(authorWt, "rev-parse", "HEAD");
+  git(clone, "worktree", "remove", authorWt);
+
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  expect(e.checkout_fallback.reason).toBe(
+    "branch feature exists locally but isn't checked out",
+  );
+
+  expect(sb.run(["dismiss", "mine:testorg/demo#7"]).code).toBe(0);
+  expect(existsSync(e.checkout_path)).toBe(false);
+  expect(git(clone, "rev-parse", "refs/heads/feature")).toBe(authorSha);
+});
+
 test("a newly discovered PR does not re-address the feedback it arrived with", async () => {
   const sb = makeSandbox();
   const { mineJson } = prScenario(sb, { receive_enabled: true });

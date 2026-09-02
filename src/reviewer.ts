@@ -188,13 +188,15 @@ export function cleanupEntry(
   // `worktree remove` leaves that ref behind — which makes every later receive
   // for the same PR refuse with "exists locally but isn't checked out". Only
   // the branch of a checkout we own is ever deleted; the user's own worktree
-  // is not in worktrees[] and its branch is not ours to touch.
+  // is not in worktrees[] and its branch is not ours to touch. A fallback is
+  // owned but detached — it created no branch, so that ref is the author's.
   const ownedCheckout =
     !!entry?.checkout_path && recorded.includes(entry.checkout_path);
   if (
     entryKind(key) === "mine" &&
     entry?.branch &&
     ownedCheckout &&
+    !entry.checkout_fallback &&
     !stuck.length
   ) {
     const d = Bun.spawnSync(
