@@ -133,14 +133,35 @@ function legacyWorktrees(clone: string, number: string): string[] {
     .filter((p) => basename(p) === `pr-${number}`);
 }
 
+// A worktree cleanup left standing, and why — a deliberate keep reads nothing
+// like a failure to the person who asked for the dismissal.
+export type Kept = { path: string; reason: "failed" | "has-commits" };
+
+const headOf = (wt: string): string =>
+  Bun.spawnSync(["git", "-C", wt, "rev-parse", "HEAD"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+    .stdout.toString()
+    .trim();
+
+// Remove one worktree, or say what it left standing. A fallback whose HEAD has
+// moved off the PR head it was created at holds commits that exist nowhere
+// else until the author cherry-picks them: that one is kept, not removed.
 function removeWorktree(
   ctx: Ctx,
   clone: string,
   wt: string,
+  entry: Entry | undefined,
   key: string,
   logPrefix: string,
-): boolean {
-  if (!existsSync(wt)) return true; // already gone; prune will drop the admin record
+): Kept | null {
+  if (!existsSync(wt)) return null; // already gone; prune will drop the admin record
+  const fb = entry?.checkout_fallback;
+  if (fb && entry?.checkout_path === wt && headOf(wt) !== fb.base) {
+    ctx.log(`${logPrefix} ${key}: kept worktree ${wt} — it has commits`);
+    return { path: wt, reason: "has-commits" };
+  }
   const p = Bun.spawnSync(
     ["git", "-C", clone, "worktree", "remove", "--force", wt],
     { stderr: "pipe" },
@@ -151,19 +172,15 @@ function removeWorktree(
       ? `${logPrefix} ${key}: removed worktree ${wt}`
       : `${logPrefix} ${key}: could not remove worktree ${wt}`,
   );
-  return p.exitCode === 0;
+  return p.exitCode === 0 ? null : { path: wt, reason: "failed" };
 }
 
 // Retire an entry's on-disk artifacts: its run log and the worktree(s) the
 // review created — by their recorded absolute paths, wherever the agent put
 // them, falling back to the pr-<number> convention for legacy entries.
-// Returns the worktrees it could not remove: the log records them, but only a
+// Returns the worktrees still standing: the log records them, but only a
 // caller can put them somewhere the user is actually looking.
-export function cleanupEntry(
-  ctx: Ctx,
-  key: string,
-  logPrefix: string,
-): string[] {
+export function cleanupEntry(ctx: Ctx, key: string, logPrefix: string): Kept[] {
   rmSync(runLogPath(ctx.paths, key), { force: true });
   const { number } = splitKey(key);
   const entry = loadState(ctx.paths.statePath)[key];
@@ -178,9 +195,9 @@ export function cleanupEntry(
     recorded.length || entryKind(key) === "mine"
       ? recorded
       : legacyWorktrees(clone, number);
-  const stuck = targets.filter(
-    (wt) => !removeWorktree(ctx, clone, wt, key, logPrefix),
-  );
+  const kept = targets
+    .map((wt) => removeWorktree(ctx, clone, wt, entry, key, logPrefix))
+    .filter((k) => k !== null);
 
   Bun.spawnSync(["git", "-C", clone, "worktree", "prune"], { stderr: "pipe" });
 
@@ -197,7 +214,7 @@ export function cleanupEntry(
     entry?.branch &&
     ownedCheckout &&
     !entry.checkout_fallback &&
-    !stuck.length
+    !kept.length
   ) {
     const d = Bun.spawnSync(
       ["git", "-C", clone, "branch", "-D", entry.branch],
@@ -206,7 +223,7 @@ export function cleanupEntry(
     if (d.exitCode === 0)
       ctx.log(`${logPrefix} ${key}: deleted branch ${entry.branch}`);
   }
-  return stuck;
+  return kept;
 }
 
 // Mark the PR as reviewing and hand it to a detached `docket exec` runner.

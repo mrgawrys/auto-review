@@ -557,6 +557,33 @@ test("dismissing a fallback run never deletes the author's branch", async () => 
   expect(git(clone, "rev-parse", "refs/heads/feature")).toBe(authorSha);
 });
 
+test("dismiss keeps a fallback the run committed in, and says so", async () => {
+  const sb = makeSandbox();
+  const { clone, mineJson } = prScenario(sb);
+  git(clone, "checkout", "-q", "feature");
+  writeFileSync(join(clone, "f.txt"), "uncommitted local work\n");
+
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  // stand in for the agent: a commit that lives only in the fallback
+  writeFileSync(join(e.checkout_path, "f.txt"), "the fix the reviewer asked\n");
+  git(e.checkout_path, "commit", "-qam", "address the feedback");
+  const fixSha = git(e.checkout_path, "rev-parse", "HEAD");
+
+  const d = sb.run(["dismiss", "mine:testorg/demo#7"]);
+  expect(d.code).toBe(0);
+  expect(d.out).toContain(`kept ${e.checkout_path} (has commits)`);
+  expect(d.out).not.toContain("could not remove");
+  expect(existsSync(e.checkout_path)).toBe(true);
+  // the point of a detached copy: the author reaches the commit from the clone
+  expect(git(clone, "cat-file", "-t", fixSha)).toBe("commit");
+});
+
 test("a newly discovered PR does not re-address the feedback it arrived with", async () => {
   const sb = makeSandbox();
   const { mineJson } = prScenario(sb, { receive_enabled: true });
