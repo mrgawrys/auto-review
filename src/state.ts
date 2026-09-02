@@ -49,6 +49,10 @@ export interface Entry {
   // clone, the user's worktree, or docket's own. Openers, enter, and the
   // receive runner's cwd all read it.
   checkout_path?: string;
+  // Set when checkout_path is docket's own detached copy rather than the
+  // user's checkout: base is the PR head it was created at, so a HEAD past it
+  // means the run committed work that lives nowhere else yet.
+  checkout_fallback?: { base: string; reason: string };
   // Mine entries: who left the newest actionable review. The panel shows it,
   // and the TUI never fetches — so sync records it here.
   reviewer?: string;

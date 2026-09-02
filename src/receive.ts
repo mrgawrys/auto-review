@@ -94,6 +94,9 @@ export function prepareCheckout(
     checkout_path: r.path,
     local_path: clone,
     branch,
+    // written every time, undefined included: a checkout that resolves in
+    // place again must stop claiming its commits live somewhere else
+    checkout_fallback: r.fallback,
     // worktrees[] means "paths docket may delete" — only a docket-created
     // checkout ever goes in.
     ...(r.owned && !(entry.worktrees ?? []).includes(r.path)

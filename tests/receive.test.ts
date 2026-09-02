@@ -247,6 +247,46 @@ test("feedback with a dirty checkout runs in a fallback, not in the user's work"
   expect(git(clone, "status", "--porcelain")).toContain("f.txt");
 });
 
+test("the entry records the fallback it ran in, and drops it once the checkout is usable", async () => {
+  const sb = makeSandbox();
+  const { clone, headSha, mineJson } = prScenario(sb, {
+    receive_enabled: true,
+  });
+  git(clone, "checkout", "-q", "feature");
+  writeFileSync(join(clone, "f.txt"), "uncommitted local work\n");
+  sb.writeState({
+    "mine:testorg/demo#7": {
+      status: "open",
+      branch: "feature",
+      local_path: clone,
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  });
+
+  expect(sb.run(["sync"], { GH_PR_MINE_JSON: mineJson }).code).toBe(0);
+  // recorded by the trigger and still there after the run rewrote the entry
+  const e = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => x.status === "ready",
+  );
+  expect(e.checkout_fallback).toEqual({
+    base: headSha,
+    reason: `checkout dirty: ${realpathSync(clone)}`,
+  });
+
+  // the author commits their work: their checkout is usable again, and the
+  // entry must stop pointing the reader at a copy the run no longer used
+  git(clone, "commit", "-qam", "the author's own commit");
+  expect(
+    sb.run(["receive", "testorg/demo#7"], { GH_PR_MINE_JSON: mineJson }).code,
+  ).toBe(0);
+  const after = await sb.waitEntry(
+    "mine:testorg/demo#7",
+    (x) => realpathSync(x.checkout_path) === realpathSync(clone),
+  );
+  expect("checkout_fallback" in after).toBe(false);
+});
+
 test("feedback while not opted in records the verdict only", () => {
   const sb = makeSandbox();
   const { clone, mineJson } = prScenario(sb); // receive_enabled absent
