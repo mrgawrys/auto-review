@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveCheckout } from "../src/checkout";
+import { type CheckoutResult, resolveCheckout } from "../src/checkout";
 
 function git(cwd: string, ...args: string[]): string {
   const p = Bun.spawnSync(
@@ -36,6 +36,22 @@ function scenario() {
 const resolve = (s: ReturnType<typeof scenario>) =>
   resolveCheckout(s.clone, "feature", s.headSha, s.checkoutsDir);
 
+// Every unusable checkout lands in the same place: docket's own detached copy
+// at the PR head, under checkoutsDir.
+function expectFallback(
+  s: ReturnType<typeof scenario>,
+  r: CheckoutResult,
+  reason: string,
+): string {
+  if (!r.ok) throw new Error(r.reason);
+  expect(r.path).toBe(realpathSync(join(s.checkoutsDir, "feature")));
+  expect(r.owned).toBe(true);
+  expect(r.fallback).toEqual({ base: s.headSha, reason });
+  expect(git(r.path, "rev-parse", "HEAD")).toBe(s.headSha);
+  expect(git(r.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+  return r.path;
+}
+
 test("branch checked out in the clone itself: reused, not owned", () => {
   const s = scenario();
   git(s.clone, "checkout", "-q", "feature");
@@ -53,19 +69,12 @@ test("branch in a user worktree: reused, not owned", () => {
   expect(r.owned).toBe(false);
 });
 
-test("dirty checkout blocks, never creates a second copy", () => {
+test("dirty checkout falls back, leaving the uncommitted work alone", () => {
   const s = scenario();
   git(s.clone, "checkout", "-q", "feature");
   writeFileSync(join(s.clone, "f.txt"), "uncommitted\n");
-  const r = resolve(s);
-  expect(r).toEqual({
-    ok: false,
-    reason: `checkout dirty: ${realpathSync(s.clone)}`,
-  });
-  // and nothing landed under checkoutsDir
-  expect(
-    git(s.clone, "worktree", "list", "--porcelain").includes("checkouts"),
-  ).toBe(false);
+  expectFallback(s, resolve(s), `checkout dirty: ${realpathSync(s.clone)}`);
+  expect(git(s.clone, "status", "--porcelain")).toContain("f.txt");
 });
 
 test("checkout with unpushed commits on top of the PR head is used in place", () => {
@@ -80,16 +89,19 @@ test("checkout with unpushed commits on top of the PR head is used in place", ()
   expect(git(s.clone, "rev-parse", "HEAD")).toBe(local);
 });
 
-test("checkout diverged from the PR head blocks", () => {
+test("checkout diverged from the PR head falls back, branch untouched", () => {
   const s = scenario();
   git(s.clone, "checkout", "-q", "feature");
   writeFileSync(join(s.clone, "f.txt"), "rewritten\n");
   git(s.clone, "commit", "-q", "--amend", "-am", "feature work, amended");
-  const r = resolve(s);
-  expect(r).toEqual({
-    ok: false,
-    reason: `checkout diverged from PR head: ${realpathSync(s.clone)}`,
-  });
+  const amended = git(s.clone, "rev-parse", "HEAD");
+  expectFallback(
+    s,
+    resolve(s),
+    `checkout diverged from PR head: ${realpathSync(s.clone)}`,
+  );
+  // the rewritten history is the author's only copy of it
+  expect(git(s.clone, "rev-parse", "refs/heads/feature")).toBe(amended);
 });
 
 test("checkout behind the PR head fast-forwards (fetching the new sha)", () => {
@@ -106,18 +118,57 @@ test("checkout behind the PR head fast-forwards (fetching the new sha)", () => {
   expect(git(s.clone, "rev-parse", "HEAD")).toBe(newHead);
 });
 
-test("branch exists locally but checked out nowhere: blocked in plain words", () => {
+test("branch exists locally but checked out nowhere: falls back, ref left alone", () => {
   const s = scenario();
   git(s.clone, "branch", "feature", "origin/feature"); // no checkout anywhere
-  const r = resolve(s);
-  expect(r).toEqual({
-    ok: false,
-    reason: "branch feature exists locally but isn't checked out",
+  expectFallback(
+    s,
+    resolve(s),
+    "branch feature exists locally but isn't checked out",
+  );
+  expect(git(s.clone, "rev-parse", "refs/heads/feature")).toBe(s.headSha);
+});
+
+test("a fallback the run committed in comes back at its own HEAD, not reset", () => {
+  const s = scenario();
+  git(s.clone, "checkout", "-q", "feature");
+  writeFileSync(join(s.clone, "f.txt"), "uncommitted\n");
+  const first = resolve(s);
+  if (!first.ok) throw new Error(first.reason);
+  writeFileSync(join(first.path, "f.txt"), "the agent's fix\n");
+  git(first.path, "commit", "-qam", "agent commit");
+  const agentSha = git(first.path, "rev-parse", "HEAD");
+
+  const again = resolve(s);
+  if (!again.ok) throw new Error(again.reason);
+  expect(again.path).toBe(first.path);
+  expect(git(again.path, "rev-parse", "HEAD")).toBe(agentSha);
+  // base stays the PR head, so a caller can still see the copy is ahead of it
+  expect(again.fallback).toEqual({
+    base: s.headSha,
+    reason: `checkout dirty: ${realpathSync(s.clone)}`,
   });
-  // and nothing landed under checkoutsDir
-  expect(
-    git(s.clone, "worktree", "list", "--porcelain").includes("checkouts"),
-  ).toBe(false);
+});
+
+test("a clean fallback behind the PR head is reset to it", () => {
+  const s = scenario();
+  git(s.clone, "checkout", "-q", "feature");
+  writeFileSync(join(s.clone, "f.txt"), "uncommitted\n");
+  const first = resolve(s);
+  if (!first.ok) throw new Error(first.reason);
+
+  // the PR gains a commit the fallback has never seen
+  git(s.origin, "checkout", "-q", "feature");
+  writeFileSync(join(s.origin, "f.txt"), "three\n");
+  git(s.origin, "commit", "-qam", "more feature work");
+  const newHead = git(s.origin, "rev-parse", "HEAD");
+  git(s.origin, "checkout", "-q", "main");
+
+  const again = resolveCheckout(s.clone, "feature", newHead, s.checkoutsDir);
+  if (!again.ok) throw new Error(again.reason);
+  expect(again.path).toBe(first.path);
+  expect(git(again.path, "rev-parse", "HEAD")).toBe(newHead);
+  expect(again.fallback?.base).toBe(newHead);
 });
 
 test("branch absent everywhere: created under checkoutsDir, tracking, owned", () => {
