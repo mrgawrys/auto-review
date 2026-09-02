@@ -61,6 +61,33 @@ test("receivePrompt: custom body substituted, preamble still fixed, note appende
   expect(p.trimEnd().endsWith("skip the nits")).toBe(true);
 });
 
+test("receivePrompt: a fallback checkout is named as one, with its reason", () => {
+  const p = receivePrompt(
+    bareCfg(),
+    "mine:acme/widgets#12",
+    entry({
+      checkout_fallback: {
+        base: "abc123",
+        reason: "checkout dirty: /home/me/widgets",
+      },
+    }),
+  );
+  expect(p).toContain("fresh worktree docket created at the PR head");
+  expect(p).toContain("(`checkout dirty: /home/me/widgets`)");
+  expect(p).toContain("detached HEAD — that is expected");
+  expect(p).toContain("the author cherry-picks your commits onto their branch");
+  // and the opener no longer calls it the author's checkout of the branch
+  expect(p).not.toContain("the checkout of its branch");
+  // the fixed preamble and the summary demand survive
+  expect(p).toContain("NEVER push");
+  expect(p).toContain('"addressed"');
+
+  // absent for an ordinary checkout, which the opener names as one
+  const plain = receivePrompt(bareCfg(), "mine:acme/widgets#12", entry());
+  expect(plain).toContain("the checkout of its branch");
+  expect(plain).not.toContain("detached HEAD");
+});
+
 test("effectiveReceivePrompt: blank override falls back to the default", () => {
   expect(effectiveReceivePrompt(bareCfg({ receive_prompt: "  " }))).toBe(
     DEFAULT_RECEIVE_PROMPT,
